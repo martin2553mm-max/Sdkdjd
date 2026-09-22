@@ -1,0 +1,851 @@
+-- =================================================================
+-- TREZ HUB v5 - SILENT AIM (Bullet Redirect)
+-- =================================================================
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local Mouse = LocalPlayer:GetMouse()
+
+-- =================================================================
+-- ===== RAYFIELD UI =====
+-- =================================================================
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Window = Rayfield:CreateWindow({
+   Name = "TREZ Hub 🇹🇭",
+   LoadingTitle = "กำลังโหลด...",
+   LoadingSubtitle = "โดย TREZ Developer",
+   ConfigurationSaving = { Enabled = false },
+   Discord = { Enabled = false },
+   KeySystem = false
+})
+
+_G.TREZ_Rayfield = Window
+
+-- =================================================================
+-- ===== VARIABLES =====
+-- =================================================================
+local SilentAimEnabled = false
+local AimFOV = 150
+local AimPart = "Head"
+local AntiWallEnabled = true
+local JitterEnabled = false
+local MultiShotEnabled = false
+local InvisibleEnabled = false
+local RainbowFOV = true
+local ShowAimLine = true
+
+-- ESP
+local EspEnabled = false
+local EspName = true
+local EspHealth = true
+local EspTools = true
+local EspTeamCheck = false
+local EspDistance = 500
+
+-- =================================================================
+-- ===== FOV CIRCLE + AIM LINE =====
+-- =================================================================
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+FOVCircle.Radius = AimFOV
+FOVCircle.Thickness = 2
+FOVCircle.Filled = false
+FOVCircle.NumSides = 80
+FOVCircle.Visible = false
+
+local AimLine = Drawing.new("Line")
+AimLine.Thickness = 2
+AimLine.Color = Color3.fromRGB(255, 40, 40)
+AimLine.Visible = false
+AimLine.Transparency = 0.75
+
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    if RainbowFOV then
+        hue = (hue + dt * 0.5) % 1
+        FOVCircle.Color = Color3.fromHSV(hue, 1, 1)
+    end
+    FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    FOVCircle.Radius = AimFOV
+    FOVCircle.Visible = SilentAimEnabled
+end)
+
+-- =================================================================
+-- ===== ANTI-WALL =====
+-- =================================================================
+local function IsVisible(targetPart)
+    if not AntiWallEnabled then return true end
+    local origin = Camera.CFrame.Position
+    local direction = targetPart.Position - origin
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { LocalPlayer.Character, Camera }
+    params.IgnoreWater = true
+    local result = workspace:Raycast(origin, direction, params)
+    if result and result.Instance then
+        return result.Instance:IsDescendantOf(targetPart.Parent)
+    end
+    return true
+end
+
+-- =================================================================
+-- ===== หาเป้าใกล้กลางจอ =====
+-- =================================================================
+local CurrentTarget = nil
+
+local function GetClosestPlayer()
+    local ClosestPlayer = nil
+    local ShortestDistance = AimFOV
+    local CenterPoint = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+
+    for _, v in pairs(Players:GetPlayers()) do
+        if v ~= LocalPlayer
+           and v.Character
+           and v.Character:FindFirstChild(AimPart)
+           and v.Character:FindFirstChildOfClass("Humanoid")
+           and v.Character.Humanoid.Health > 0
+        then
+            local targetPart = v.Character[AimPart]
+            local PartPos, OnScreen = Camera:WorldToViewportPoint(targetPart.Position)
+            if OnScreen then
+                local Distance = (Vector2.new(PartPos.X, PartPos.Y) - CenterPoint).Magnitude
+                if Distance < ShortestDistance and IsVisible(targetPart) then
+                    ClosestPlayer = v
+                    ShortestDistance = Distance
+                end
+            end
+        end
+    end
+    return ClosestPlayer
+end
+
+-- =================================================================
+-- ===== AIM LINE (วาดเส้นแดงไปหาเป้า — ไม่หมุนกล้อง) =====
+-- =================================================================
+RunService.RenderStepped:Connect(function()
+    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+
+    if SilentAimEnabled then
+        CurrentTarget = GetClosestPlayer()
+    else
+        CurrentTarget = nil
+    end
+
+    -- วาดเส้นสีแดงจากกลางจอ → เป้า
+    if CurrentTarget and CurrentTarget.Character
+       and CurrentTarget.Character:FindFirstChild(AimPart) and ShowAimLine
+    then
+        local targetPos = CurrentTarget.Character[AimPart].Position
+        local screenPos, onScreen = Camera:WorldToViewportPoint(targetPos)
+        if onScreen then
+            AimLine.From = center
+            AimLine.To = Vector2.new(screenPos.X, screenPos.Y)
+            AimLine.Visible = true
+        else
+            AimLine.Visible = false
+        end
+    else
+        AimLine.Visible = false
+    end
+end)
+
+-- =================================================================
+-- ===== SILENT AIM v2 (Hook หลายจุด) =====
+-- =================================================================
+local function GetTargetPosition()
+    if not SilentAimEnabled then return nil end
+    if not CurrentTarget or not CurrentTarget.Character then return nil end
+    local part = CurrentTarget.Character:FindFirstChild(AimPart)
+    if not part then return nil end
+    return part.Position
+end
+
+local mt = getrawmetatable(game)
+local oldNamecall = mt.__namecall
+local oldIndex = mt.__index
+setreadonly(mt, false)
+
+-- 1) Hook ray methods (FindPartOnRay / Raycast)
+mt.__namecall = newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+    local targetPos = GetTargetPosition()
+
+    if targetPos then
+        -- Raycast(origin, direction, params)
+        if method == "Raycast" then
+            local origin = args[1]
+            if typeof(origin) == "Vector3" then
+                args[2] = targetPos - origin
+            end
+            return oldNamecall(self, unpack(args))
+        end
+
+        -- FindPartOnRay / FindPartOnRayWithIgnoreList / Whitelist
+        if method == "FindPartOnRay"
+           or method == "FindPartOnRayWithIgnoreList"
+           or method == "FindPartOnRayWithWhitelist" then
+            local ray = args[1]
+            if typeof(ray) == "Ray" then
+                args[1] = Ray.new(ray.Origin, (targetPos - ray.Origin).Unit * 5000)
+            end
+            return oldNamecall(self, unpack(args))
+        end
+    end
+
+    return oldNamecall(self, ...)
+end)
+
+-- 2) Hook Mouse.Hit / Mouse.Target / Mouse.UnitRay
+mt.__index = newcclosure(function(self, key)
+    if SilentAimEnabled and typeof(self) == "Instance" and self:IsA("Mouse") then
+        local targetPos = GetTargetPosition()
+        if targetPos then
+            if key == "Hit" then
+                return CFrame.new(targetPos)
+            elseif key == "Target" then
+                if CurrentTarget and CurrentTarget.Character then
+                    return CurrentTarget.Character[AimPart]
+                end
+            elseif key == "UnitRay" then
+                local origin = self.Origin
+                return Ray.new(origin, (targetPos - origin).Unit)
+            end
+        end
+    end
+    return oldIndex(self, key)
+end)
+
+setreadonly(mt, true)
+
+-- =================================================================
+-- ===== UI: PvP TAB =====
+-- =================================================================
+local MainTab = Window:CreateTab("PvP 🎯", 4483362458)
+
+MainTab:CreateSection("Silent Aim (กระสุนโค้งตามเส้นแดง)")
+
+MainTab:CreateToggle({
+   Name = "เปิด Silent Aim",
+   CurrentValue = false,
+   Callback = function(Value) SilentAimEnabled = Value end,
+})
+
+MainTab:CreateToggle({
+   Name = "แสดงเส้นสีแดงจากกลางจอ → เป้า",
+   CurrentValue = true,
+   Callback = function(Value) ShowAimLine = Value end,
+})
+
+MainTab:CreateToggle({
+   Name = "วง FOV สีรุ้ง 🌈",
+   CurrentValue = true,
+   Callback = function(Value) RainbowFOV = Value end,
+})
+
+MainTab:CreateToggle({
+   Name = "ไม่ล็อกทะลุกำแพง (Anti-Wall)",
+   CurrentValue = true,
+   Callback = function(Value) AntiWallEnabled = Value end,
+})
+
+MainTab:CreateSlider({
+   Name = "ขนาดวง FOV",
+   Range = {30, 600},
+   Increment = 5,
+   Suffix = "px",
+   CurrentValue = 150,
+   Callback = function(Value) AimFOV = Value end,
+})
+
+MainTab:CreateDropdown({
+   Name = "ตำแหน่งล็อก",
+   Options = {"หัว (Head)", "ตัว (Body)", "ขา (Leg)"},
+   CurrentOption = {"หัว (Head)"},
+   Callback = function(Option)
+      local choice = Option[1] or Option
+      if choice == "หัว (Head)" then AimPart = "Head"
+      elseif choice == "ตัว (Body)" then AimPart = "HumanoidRootPart"
+      elseif choice == "ขา (Leg)" then AimPart = "RightUpperLeg" end
+   end,
+})
+
+-- =================================================================
+-- ===== UI: COMBAT TAB =====
+-- =================================================================
+local CombatTab = Window:CreateTab("Combat ⚔️", 4483362458)
+
+CombatTab:CreateSection("ระบบต่อสู้ & ป้องกัน")
+
+CombatTab:CreateToggle({
+   Name = "หมุนตัวหลบกระสุน (Spin Anti-Aim)",
+   CurrentValue = false,
+   Callback = function(Value) JitterEnabled = Value end,
+})
+
+local spinAngle = 0
+RunService.Heartbeat:Connect(function(dt)
+   if JitterEnabled and LocalPlayer.Character then
+      local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+      local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+      if hrp and hum and hum.Health > 0 then
+         spinAngle = (spinAngle + dt * 720) % 360
+         local look = hrp.CFrame.LookVector
+         local flat = Vector3.new(look.X, 0, look.Z)
+         if flat.Magnitude > 0 then
+            local baseCF = CFrame.lookAt(hrp.Position, hrp.Position + flat.Unit)
+            hrp.CFrame = baseCF * CFrame.Angles(0, math.rad(spinAngle), 0)
+         end
+      end
+   end
+end)
+
+CombatTab:CreateToggle({
+   Name = "ยิง 2 นัด (Multi-Shot x2)",
+   CurrentValue = false,
+   Callback = function(Value) MultiShotEnabled = Value end,
+})
+
+local function HookTool(tool)
+   if not tool:IsA("Tool") then return end
+   if tool:GetAttribute("TREZ_Hooked") then return end
+   tool:SetAttribute("TREZ_Hooked", true)
+   tool.Activated:Connect(function()
+      if MultiShotEnabled then
+         task.wait(0.02)
+         pcall(function() tool:Activate() end)
+      end
+   end)
+end
+
+local function HookCharacter(char)
+   for _, child in pairs(char:GetChildren()) do HookTool(child) end
+   char.ChildAdded:Connect(function(child)
+      task.wait(0.1); HookTool(child)
+   end)
+end
+
+if LocalPlayer.Character then HookCharacter(LocalPlayer.Character) end
+LocalPlayer.CharacterAdded:Connect(HookCharacter)
+
+-- ===== Invisible =====
+local function SetCharacterTransparency(char, transparency)
+   if not char then return end
+   for _, part in pairs(char:GetDescendants()) do
+      if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+         pcall(function() part.Transparency = transparency end)
+         pcall(function() part.LocalTransparencyModifier = transparency end)
+      elseif part:IsA("Decal") or part:IsA("Texture") then
+         pcall(function() part.Transparency = transparency end)
+      elseif part:IsA("BillboardGui") or part:IsA("Highlight") or part:IsA("SelectionBox") then
+         pcall(function() part.Enabled = (transparency == 0) end)
+      end
+   end
+   local hum = char:FindFirstChildOfClass("Humanoid")
+   if hum then
+      hum.NameDisplayDistance = (transparency == 1) and 0 or 100
+      hum.HealthDisplayDistance = (transparency == 1) and 0 or 100
+   end
+   for _, acc in pairs(char:GetChildren()) do
+      if acc:IsA("Accessory") then
+         local handle = acc:FindFirstChild("Handle")
+         if handle then
+            pcall(function() handle.Transparency = transparency end)
+            pcall(function() handle.LocalTransparencyModifier = transparency end)
+         end
+      end
+   end
+end
+
+CombatTab:CreateToggle({
+   Name = "ล่องหน (Invisible)",
+   CurrentValue = false,
+   Callback = function(Value)
+      InvisibleEnabled = Value
+      if LocalPlayer.Character then
+         SetCharacterTransparency(LocalPlayer.Character, Value and 1 or 0)
+      end
+   end,
+})
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+   if InvisibleEnabled then
+      task.wait(0.8)
+      SetCharacterTransparency(char, 1)
+   end
+end)
+
+task.spawn(function()
+   while task.wait(0.5) do
+      if InvisibleEnabled and LocalPlayer.Character then
+         SetCharacterTransparency(LocalPlayer.Character, 1)
+      end
+   end
+end)
+
+-- =================================================================
+-- ===== ESP SYSTEM =====
+-- =================================================================
+local ESP_Objects = {}
+
+local function CreateESPForPlayer(plr)
+    if plr == LocalPlayer then return end
+    if ESP_Objects[plr] then return end
+
+    local objs = {}
+
+    objs.name = Drawing.new("Text")
+    objs.name.Size = 14
+    objs.name.Center = true
+    objs.name.Outline = true
+    objs.name.Color = Color3.fromRGB(255, 255, 255)
+    objs.name.Font = 2
+    objs.name.Visible = false
+
+    objs.healthBG = Drawing.new("Square")
+    objs.healthBG.Thickness = 1
+    objs.healthBG.Filled = true
+    objs.healthBG.Color = Color3.fromRGB(20, 20, 20)
+    objs.healthBG.Visible = false
+
+    objs.healthFill = Drawing.new("Square")
+    objs.healthFill.Thickness = 0
+    objs.healthFill.Filled = true
+    objs.healthFill.Color = Color3.fromRGB(0, 255, 0)
+    objs.healthFill.Visible = false
+
+    objs.healthText = Drawing.new("Text")
+    objs.healthText.Size = 12
+    objs.healthText.Center = true
+    objs.healthText.Outline = true
+    objs.healthText.Color = Color3.fromRGB(255, 255, 255)
+    objs.healthText.Font = 2
+    objs.healthText.Visible = false
+
+    objs.tools = Drawing.new("Text")
+    objs.tools.Size = 12
+    objs.tools.Center = true
+    objs.tools.Outline = true
+    objs.tools.Color = Color3.fromRGB(255, 220, 80)
+    objs.tools.Font = 2
+    objs.tools.Visible = false
+
+    ESP_Objects[plr] = objs
+end
+
+local function RemoveESPForPlayer(plr)
+    local objs = ESP_Objects[plr]
+    if not objs then return end
+    for _, obj in pairs(objs) do
+        pcall(function() obj:Remove() end)
+    end
+    ESP_Objects[plr] = nil
+end
+
+for _, plr in pairs(Players:GetPlayers()) do
+    CreateESPForPlayer(plr)
+end
+Players.PlayerAdded:Connect(CreateESPForPlayer)
+Players.PlayerRemoving:Connect(RemoveESPForPlayer)
+
+RunService.RenderStepped:Connect(function()
+    if not EspEnabled then
+        for _, objs in pairs(ESP_Objects) do
+            for _, o in pairs(objs) do
+                o.Visible = false
+            end
+        end
+        return
+    end
+
+    local localChar = LocalPlayer.Character
+    local localHRP = localChar and localChar:FindFirstChild("HumanoidRootPart")
+    local localPos = localHRP and localHRP.Position
+    local localTeam = LocalPlayer.Team
+
+    for plr, objs in pairs(ESP_Objects) do
+        local char = plr.Character
+        if not char then
+            for _, o in pairs(objs) do o.Visible = false end
+            continue
+        end
+
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local head = char:FindFirstChild("Head")
+
+        if not hum or not hrp or not head or hum.Health <= 0 then
+            for _, o in pairs(objs) do o.Visible = false end
+            continue
+        end
+
+        if EspTeamCheck and plr.Team == localTeam then
+            for _, o in pairs(objs) do o.Visible = false end
+            continue
+        end
+
+        local dist = localPos and (hrp.Position - localPos).Magnitude or 0
+        if dist > EspDistance then
+            for _, o in pairs(objs) do o.Visible = false end
+            continue
+        end
+
+        local headScreen, headOnScreen = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 1.2, 0))
+        local rootScreen, rootOnScreen = Camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 2.8, 0))
+
+        if not headOnScreen or not rootOnScreen then
+            for _, o in pairs(objs) do o.Visible = false end
+            continue
+        end
+
+        local topY = headScreen.Y
+        local botY = rootScreen.Y
+        local centerX = headScreen.X
+
+        if EspName then
+            objs.name.Text = plr.Name
+            objs.name.Position = Vector2.new(centerX, topY - 18)
+            objs.name.Visible = true
+        else
+            objs.name.Visible = false
+        end
+
+        if EspHealth then
+            local barWidth = 60
+            local barHeight = 6
+            local barX = centerX - barWidth / 2
+            local barY = topY - 6
+            local hpRatio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+
+            objs.healthBG.Size = Vector2.new(barWidth, barHeight)
+            objs.healthBG.Position = Vector2.new(barX, barY)
+            objs.healthBG.Visible = true
+
+            objs.healthFill.Size = Vector2.new(barWidth * hpRatio, barHeight)
+            objs.healthFill.Position = Vector2.new(barX, barY)
+            if hpRatio > 0.6 then
+                objs.healthFill.Color = Color3.fromRGB(0, 255, 0)
+            elseif hpRatio > 0.3 then
+                objs.healthFill.Color = Color3.fromRGB(255, 200, 0)
+            else
+                objs.healthFill.Color = Color3.fromRGB(255, 40, 40)
+            end
+            objs.healthFill.Visible = true
+
+            objs.healthText.Text = string.format("%d / %d", math.floor(hum.Health), math.floor(hum.MaxHealth))
+            objs.healthText.Position = Vector2.new(centerX, botY + 4)
+            objs.healthText.Visible = true
+        else
+            objs.healthBG.Visible = false
+            objs.healthFill.Visible = false
+            objs.healthText.Visible = false
+        end
+
+        if EspTools then
+            local toolList = {}
+            for _, child in pairs(char:GetChildren()) do
+                if child:IsA("Tool") then
+                    table.insert(toolList, child.Name)
+                end
+            end
+            if #toolList > 0 then
+                objs.tools.Text = "🎒 " .. table.concat(toolList, ", ")
+                objs.tools.Position = Vector2.new(centerX, botY + 20)
+                objs.tools.Visible = true
+            else
+                objs.tools.Visible = false
+            end
+        else
+            objs.tools.Visible = false
+        end
+    end
+end)
+
+-- =================================================================
+-- ===== UI: ESP TAB =====
+-- =================================================================
+local EspTab = Window:CreateTab("ESP 👁️", 4483362458)
+
+EspTab:CreateSection("ระบบมองเห็น")
+
+EspTab:CreateToggle({
+   Name = "เปิด/ปิด ESP",
+   CurrentValue = false,
+   Callback = function(Value) EspEnabled = Value end,
+})
+
+EspTab:CreateToggle({
+   Name = "มองชื่อ 👤",
+   CurrentValue = true,
+   Callback = function(Value) EspName = Value end,
+})
+
+EspTab:CreateToggle({
+   Name = "มองเลือด ❤️",
+   CurrentValue = true,
+   Callback = function(Value) EspHealth = Value end,
+})
+
+EspTab:CreateToggle({
+   Name = "มองของในตัว 🎒",
+   CurrentValue = true,
+   Callback = function(Value) EspTools = Value end,
+})
+
+EspTab:CreateToggle({
+   Name = "ไม่โชว์เพื่อนร่วมทีม",
+   CurrentValue = false,
+   Callback = function(Value) EspTeamCheck = Value end,
+})
+
+EspTab:CreateSlider({
+   Name = "ระยะมองเห็น ESP",
+   Range = {50, 2000},
+   Increment = 50,
+   Suffix = "studs",
+   CurrentValue = 500,
+   Callback = function(Value) EspDistance = Value end,
+})
+
+-- =================================================================
+-- ===== FLOATING BUTTON =====
+-- =================================================================
+local function GetSafeParent()
+    if gethui then
+        local ok, hui = pcall(gethui)
+        if ok and hui then return hui end
+    end
+    local test = Instance.new("ScreenGui")
+    local ok = pcall(function() test.Parent = CoreGui end)
+    test:Destroy()
+    if ok then return CoreGui end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local guiParent = GetSafeParent()
+local old = guiParent:FindFirstChild("TREZ_FloatButton")
+if old then old:Destroy() end
+
+local FloatGui = Instance.new("ScreenGui")
+FloatGui.Name = "TREZ_FloatButton"
+FloatGui.ResetOnSpawn = false
+FloatGui.IgnoreGuiInset = true
+FloatGui.DisplayOrder = 9999
+FloatGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+if syn and syn.protect_gui then pcall(function() syn.protect_gui(FloatGui) end) end
+FloatGui.Parent = guiParent
+
+local Container = Instance.new("Frame")
+Container.AnchorPoint = Vector2.new(0.5, 0.5)
+Container.Position = UDim2.new(0, 130, 0.35, 0)
+Container.Size = UDim2.new(0, 220, 0, 58)
+Container.BackgroundTransparency = 1
+Container.Parent = FloatGui
+
+local Glow = Instance.new("Frame")
+Glow.Size = UDim2.new(1, 0, 1, 0)
+Glow.BackgroundTransparency = 1
+Glow.BorderSizePixel = 0
+Glow.ZIndex = 1
+Glow.Parent = Container
+
+local GlowCorner = Instance.new("UICorner")
+GlowCorner.CornerRadius = UDim.new(1, 0)
+GlowCorner.Parent = Glow
+
+local GlowStroke = Instance.new("UIStroke")
+GlowStroke.Thickness = 7
+GlowStroke.Transparency = 0.5
+GlowStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+GlowStroke.Parent = Glow
+
+local GlowGradient = Instance.new("UIGradient")
+GlowGradient.Color = ColorSequence.new{
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 170, 255)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(130, 60, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(220, 60, 255))
+}
+GlowGradient.Parent = GlowStroke
+
+local Body = Instance.new("Frame")
+Body.Size = UDim2.new(1, 0, 1, 0)
+Body.BackgroundColor3 = Color3.fromRGB(12, 16, 26)
+Body.BackgroundTransparency = 0.05
+Body.BorderSizePixel = 0
+Body.ZIndex = 2
+Body.Active = true
+Body.Parent = Container
+
+local BodyCorner = Instance.new("UICorner")
+BodyCorner.CornerRadius = UDim.new(1, 0)
+BodyCorner.Parent = Body
+
+local BodyStroke = Instance.new("UIStroke")
+BodyStroke.Thickness = 1.2
+BodyStroke.Parent = Body
+
+local BodyGradient = Instance.new("UIGradient")
+BodyGradient.Color = ColorSequence.new{
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 170, 255)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(130, 60, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(220, 60, 255))
+}
+BodyGradient.Parent = BodyStroke
+
+local Handle = Instance.new("Frame")
+Handle.AnchorPoint = Vector2.new(0.5, 0.5)
+Handle.Position = UDim2.new(0, 36, 0.5, 0)
+Handle.Size = UDim2.new(0, 26, 0, 26)
+Handle.BackgroundTransparency = 1
+Handle.ZIndex = 4
+Handle.Parent = Container
+
+local hBar = Instance.new("Frame")
+hBar.AnchorPoint = Vector2.new(0.5, 0.5)
+hBar.Position = UDim2.new(0.5, 0, 0.5, 0)
+hBar.Size = UDim2.new(0.9, 0, 0, 2.5)
+hBar.BackgroundColor3 = Color3.fromRGB(235, 235, 235)
+hBar.BorderSizePixel = 0
+hBar.ZIndex = 4
+hBar.Parent = Handle
+local hc = Instance.new("UICorner"); hc.CornerRadius = UDim.new(1, 0); hc.Parent = hBar
+
+local vBar = Instance.new("Frame")
+vBar.AnchorPoint = Vector2.new(0.5, 0.5)
+vBar.Position = UDim2.new(0.5, 0, 0.5, 0)
+vBar.Size = UDim2.new(0, 2.5, 0.9, 0)
+vBar.BackgroundColor3 = Color3.fromRGB(235, 235, 235)
+vBar.BorderSizePixel = 0
+vBar.ZIndex = 4
+vBar.Parent = Handle
+local vc = Instance.new("UICorner"); vc.CornerRadius = UDim.new(1, 0); vc.Parent = vBar
+
+for _, pos in ipairs({
+    UDim2.new(0.5, 0, 0.06, 0),
+    UDim2.new(0.5, 0, 0.94, 0),
+    UDim2.new(0.06, 0, 0.5, 0),
+    UDim2.new(0.94, 0, 0.5, 0),
+}) do
+    local tri = Instance.new("Frame")
+    tri.AnchorPoint = Vector2.new(0.5, 0.5)
+    tri.Position = pos
+    tri.Size = UDim2.new(0, 5, 0, 5)
+    tri.BackgroundColor3 = Color3.fromRGB(235, 235, 235)
+    tri.BorderSizePixel = 0
+    tri.ZIndex = 4
+    tri.Rotation = 45
+    tri.Parent = Handle
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 1); c.Parent = tri
+end
+
+local Divider = Instance.new("Frame")
+Divider.AnchorPoint = Vector2.new(0, 0.5)
+Divider.Position = UDim2.new(0, 72, 0.5, 0)
+Divider.Size = UDim2.new(0, 1.2, 0.55, 0)
+Divider.BackgroundColor3 = Color3.fromRGB(80, 85, 105)
+Divider.BackgroundTransparency = 0.4
+Divider.BorderSizePixel = 0
+Divider.ZIndex = 4
+Divider.Parent = Container
+local dc = Instance.new("UICorner"); dc.CornerRadius = UDim.new(1, 0); dc.Parent = Divider
+
+local Logo = Instance.new("ImageLabel")
+Logo.AnchorPoint = Vector2.new(0.5, 0.5)
+Logo.Position = UDim2.new(0, 108, 0.5, 0)
+Logo.Size = UDim2.new(0, 32, 0, 32)
+Logo.BackgroundTransparency = 1
+Logo.Image = "rbxassetid://91403725911047"
+Logo.ScaleType = Enum.ScaleType.Fit
+Logo.ZIndex = 4
+Logo.Parent = Container
+
+local Title = Instance.new("TextLabel")
+Title.AnchorPoint = Vector2.new(0, 0.5)
+Title.Position = UDim2.new(0, 132, 0.5, 0)
+Title.Size = UDim2.new(0, 80, 0, 28)
+Title.BackgroundTransparency = 1
+Title.Text = "TREZ Hub"
+Title.TextColor3 = Color3.fromRGB(245, 245, 250)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 17
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.ZIndex = 4
+Title.Parent = Container
+
+local function ToggleRayfield()
+    pcall(function()
+        if _G.TREZ_Rayfield and _G.TREZ_Rayfield.ToggleUI then
+            _G.TREZ_Rayfield:ToggleUI()
+            return
+        end
+    end)
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.RightControl, false, game)
+        task.wait(0.05)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.RightControl, false, game)
+    end)
+end
+
+local isDragging, wasDragged = false, false
+local dragStart, startPos
+
+Body.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        isDragging = true
+        wasDragged = false
+        dragStart = input.Position
+        startPos = Container.Position
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if isDragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+       or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        if math.abs(delta.X) > 5 or math.abs(delta.Y) > 5 then
+            wasDragged = true
+        end
+        if wasDragged then
+            Container.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if isDragging and (input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch) then
+        isDragging = false
+        if not wasDragged then
+            ToggleRayfield()
+        end
+    end
+end)
+
+Body.MouseEnter:Connect(function()
+    TweenService:Create(BodyStroke, TweenInfo.new(0.2), { Thickness = 2 }):Play()
+    TweenService:Create(Body, TweenInfo.new(0.2), { BackgroundTransparency = 0 }):Play()
+end)
+Body.MouseLeave:Connect(function()
+    TweenService:Create(BodyStroke, TweenInfo.new(0.2), { Thickness = 1.2 }):Play()
+    TweenService:Create(Body, TweenInfo.new(0.2), { BackgroundTransparency = 0.05 }):Play()
+end)
+
+Rayfield:Notify({
+   Title = "TREZ Hub v5 พร้อมใช้งาน",
+   Content = "Silent Aim - กระสุนโค้งตามเส้นแดง (ไม่หมุนกล้อง)",
+   Duration = 5,
+   Image = 4483362458,
+})
+
+print("[TREZ] Hub v5 โหลดสำเร็จ!")
